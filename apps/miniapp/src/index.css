@@ -1,0 +1,9 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  font-family: Vazirmatn, Tahoma, Arial, sans-serif;
+  background: var(--tg-bg-color, #0e1621);
+  color: var(--tg-text-color, #ffffff);
+}

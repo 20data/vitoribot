@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npx prisma generate --schema packages/db/prisma/schema.prisma
+
+      - name: Lint
+        run: npx turbo run lint --continue
+
+      - name: Typecheck
+        run: npx turbo run typecheck --continue
+
+      - name: Test
+        run: npx turbo run test --continue
+
+      - name: Build server
+        run: npm run build --workspace=@vitoribot/server
+
+      - name: Build web
+        run: npm run build --workspace=@vitoribot/web
+        env:
+          NEXT_PUBLIC_BACKEND_URL: http://localhost:3001
+
+      - name: Build miniapp
+        run: npm run build --workspace=@vitoribot/miniapp

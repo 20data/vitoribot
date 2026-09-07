@@ -1,0 +1,32 @@
+{
+  "name": "vitoribot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VitoriBot — Persian VPN management and sales system (3x-ui + Telegram bot + web panel + mini app)",
+  "packageManager": "npm@10.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "db:generate": "npm run db:generate --workspace=@vitoribot/db",
+    "db:migrate": "npm run db:migrate --workspace=@vitoribot/db",
+    "db:seed": "npm run db:seed --workspace=@vitoribot/db"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^8.69.0",
+    "@typescript-eslint/parser": "^8.69.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.3.0",
+    "turbo": "^2.3.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

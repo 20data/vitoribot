@@ -1,0 +1,360 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  SUPPORT
+  USER
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  EXPIRED
+  SUSPENDED
+}
+
+enum TransactionType {
+  CHARGE
+  PURCHASE
+  REFUND
+  GIFT
+  DISCOUNT
+}
+
+enum TransactionStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+  CANCELLED
+}
+
+enum ReceiptStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum TicketStatus {
+  OPEN
+  ANSWERED
+  CLOSED
+}
+
+enum DiscountType {
+  PERCENT
+  FIXED_AMOUNT
+}
+
+enum DiscountTarget {
+  ALL
+  NEW_PURCHASE
+  RENEWAL
+  FIRST_PURCHASE
+}
+
+enum AdminAction {
+  USER_BLOCK
+  USER_UNBLOCK
+  USER_BALANCE_CHANGE
+  USER_ROLE_CHANGE
+  RECEIPT_APPROVE
+  RECEIPT_REJECT
+  SUBSCRIPTION_SUSPEND
+  SUBSCRIPTION_RESTORE
+  SUBSCRIPTION_DELETE
+  PRODUCT_CREATE
+  PRODUCT_EDIT
+  PRODUCT_DELETE
+  PANEL_ADD
+  PANEL_EDIT
+  PANEL_DELETE
+  BROADCAST_SEND
+  SETTINGS_CHANGE
+  ADMIN_ADD
+  ADMIN_REMOVE
+  MESSAGE_SEND
+}
+
+model User {
+  id              String    @id @default(uuid())
+  telegramId      BigInt    @unique
+  username        String?
+  firstName       String
+  lastName        String?
+  phone           String?
+  balance         Decimal   @default(0) @db.Decimal(12, 2)
+  role            Role      @default(USER)
+  isBlocked       Boolean   @default(false)
+  isTermsAccepted Boolean   @default(false)
+  totpSecret      String?                    // AES-256-GCM encrypted TOTP secret (admin 2FA)
+  referredById    String?
+  referredBy      User?     @relation("referral", fields: [referredById], references: [id])
+  referrals       User[]    @relation("referral")
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  subscriptions   Subscription[]
+  transactions    Transaction[]
+  tickets         Ticket[]
+  discountCodeUses DiscountCodeUse[]
+  giftCodeUses    GiftCodeUse[]
+
+  @@index([role])
+  @@index([isBlocked])
+  @@index([createdAt])
+}
+
+model Panel {
+  id            String    @id @default(uuid())
+  name          String
+  url           String
+  username      String
+  encryptedPass String
+  remarkPrefix  String    @default("")
+  isActive      Boolean   @default(true)
+  isOnline      Boolean   @default(true)
+  lastCheckedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  products      Product[]
+
+  @@index([isActive])
+  @@index([isOnline])
+}
+
+model Product {
+  id           String    @id @default(uuid())
+  panelId      String
+  panel        Panel     @relation(fields: [panelId], references: [id])
+  groupName    String
+  name         String
+  inboundId    Int
+  trafficGB    Int
+  durationDays Int
+  price        Decimal   @db.Decimal(12, 2)
+  isActive     Boolean   @default(true)
+  sortOrder    Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  subscriptions Subscription[]
+
+  @@index([panelId])
+  @@index([isActive])
+}
+
+model Subscription {
+  id          String             @id @default(uuid())
+  userId      String
+  user        User               @relation(fields: [userId], references: [id])
+  productId   String
+  product     Product            @relation(fields: [productId], references: [id])
+  panelId     String
+  inboundId   Int
+  clientUuid  String
+  clientEmail String
+  subId       String
+  subLink     String
+  expiresAt   DateTime?
+  status      SubscriptionStatus @default(ACTIVE)
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([expiresAt])
+  @@index([panelId])
+}
+
+model Transaction {
+  id             String            @id @default(uuid())
+  userId         String
+  user           User              @relation(fields: [userId], references: [id])
+  amount         Decimal           @db.Decimal(12, 2)
+  type           TransactionType
+  status         TransactionStatus @default(PENDING)
+  description    String?
+  metadata       Json?
+  paymentReceipt PaymentReceipt?
+  confirmedAt    DateTime?
+  confirmedById  String?
+  createdAt      DateTime          @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model PaymentReceipt {
+  id                String        @id @default(uuid())
+  transactionId     String        @unique
+  transaction       Transaction   @relation(fields: [transactionId], references: [id])
+  userId            String
+  imageStoragePath  String
+  imageTelegramFileId String?
+  status            ReceiptStatus @default(PENDING)
+  rejectionReason   String?
+  reviewedById      String?
+  reviewedAt        DateTime?
+  createdAt         DateTime      @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([userId])
+}
+
+model Ticket {
+  id           String        @id @default(uuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  departmentId String
+  department   Department    @relation(fields: [departmentId], references: [id])
+  subject      String
+  status       TicketStatus  @default(OPEN)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  messages     TicketMessage[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([departmentId])
+}
+
+model TicketMessage {
+  id          String   @id @default(uuid())
+  ticketId    String
+  ticket      Ticket   @relation(fields: [ticketId], references: [id])
+  senderId    String
+  senderRole  Role
+  message     String   @db.Text
+  attachments Json?
+  createdAt   DateTime @default(now())
+
+  @@index([ticketId])
+}
+
+model Department {
+  id        String   @id @default(uuid())
+  name      String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  tickets   Ticket[]
+
+  @@index([isActive])
+}
+
+model DiscountCode {
+  id           String         @id @default(uuid())
+  code         String         @unique
+  type         DiscountType
+  value        Decimal        @db.Decimal(10, 2)
+  maxUses      Int?
+  usedCount    Int            @default(0)
+  validFrom    DateTime?
+  validTo      DateTime?
+  applicableTo DiscountTarget
+  isActive     Boolean        @default(true)
+  createdAt    DateTime       @default(now())
+  uses         DiscountCodeUse[]
+
+  @@index([isActive])
+}
+
+model DiscountCodeUse {
+  id             String       @id @default(uuid())
+  discountCodeId String
+  discountCode   DiscountCode @relation(fields: [discountCodeId], references: [id])
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+  transactionId  String
+  usedAt         DateTime     @default(now())
+
+  @@unique([discountCodeId, userId])
+  @@index([userId])
+}
+
+model GiftCode {
+  id        String       @id @default(uuid())
+  code      String       @unique
+  amount    Decimal      @db.Decimal(10, 2)
+  maxUses   Int?
+  usedCount Int          @default(0)
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  uses      GiftCodeUse[]
+
+  @@index([isActive])
+}
+
+model GiftCodeUse {
+  id         String   @id @default(uuid())
+  giftCodeId String
+  giftCode   GiftCode @relation(fields: [giftCodeId], references: [id])
+  userId     String
+  user       User     @relation(fields: [userId], references: [id])
+  usedAt     DateTime @default(now())
+
+  @@unique([giftCodeId, userId])
+  @@index([userId])
+}
+
+model ForceJoinChannel {
+  id              String  @id @default(uuid())
+  channelId       BigInt
+  channelUsername String
+  channelTitle    String
+  isActive        Boolean @default(true)
+  createdAt       DateTime @default(now())
+
+  @@index([isActive])
+}
+
+model BotMessage {
+  key       String   @id
+  content   String   @db.Text
+  updatedAt DateTime @updatedAt
+}
+
+model AdminLog {
+  id        String      @id @default(uuid())
+  adminId   String
+  action    AdminAction
+  targetType String?
+  targetId  String?
+  metadata  Json?
+  ipAddress String
+  userAgent String?
+  createdAt DateTime    @default(now())
+
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model Setting {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+}
+
+model Broadcast {
+  id          String    @id @default(uuid())
+  target      String
+  message     String    @db.Text
+  photoPath   String?
+  totalCount  Int       @default(0)
+  sentCount   Int       @default(0)
+  failedCount Int       @default(0)
+  status      String    @default("PENDING")
+  createdById String
+  createdAt   DateTime  @default(now())
+  finishedAt  DateTime?
+
+  @@index([status])
+  @@index([createdAt])
+}

@@ -1,0 +1,1115 @@
+You are a senior full-stack engineer and system architect. Build a
+production-ready, commercially deployable VPN management and sales
+system called "VitoriBot" — a Persian-language platform that connects
+to one or more 3x-ui panels (https://github.com/MHSanaei/3x-ui) and
+provides a Telegram bot, a web admin panel, and a Telegram Mini App.
+
+Reference project for feature inspiration (do NOT copy code):
+https://github.com/mahdiMGF2/mirzabot
+Study its directory layout (api/, app/, cronbot/, db/, lang/, panel/,
+payment/, sub/, vpnbot/) and its UX flows — then build something
+architecturally superior in Node.js/TypeScript.
+
+═══════════════════════════════════════════════════
+LANGUAGE RULE (ABSOLUTE)
+═══════════════════════════════════════════════════
+Every string a human reads — bot messages, button labels, web panel
+text, Mini App UI, error messages, validation feedback, email bodies,
+PDF receipts, toast notifications — MUST be in Persian (Farsi).
+All code, variable names, comments, git messages, and docs: English.
+All text displayed to users must support RTL rendering (dir="rtl").
+Persian dates must use the Jalali (Shamsi) calendar via the
+`moment-jalaali` or `jalaali-js` library. All timestamps stored as UTC.
+
+═══════════════════════════════════════════════════
+TECH STACK
+═══════════════════════════════════════════════════
+
+Backend (monorepo root: apps/server):
+  Runtime:    Node.js 20 LTS, TypeScript 5 (strict mode)
+  Framework:  Fastify 4 with @fastify/cors, @fastify/helmet,
+              @fastify/rate-limit, @fastify/multipart,
+              @fastify/static, @fastify/cookie, @fastify/session
+  ORM:        Prisma 5 with PostgreSQL 15
+  Cache:      Redis 7 via ioredis
+  Bot:        grammy 1.x + grammy conversations + grammy menu
+  Queue:      BullMQ 5 (Redis-backed) for all async / scheduled work
+  Auth:       JWT RS256 + refresh token rotation (Redis stored)
+  Validation: Zod 3 on every inbound schema boundary
+  Storage:    Local filesystem (with multer) or S3-compatible (MinIO)
+              for receipt images — configurable via env
+  Logging:    Pino with pino-pretty for dev, structured JSON for prod
+
+Web Admin Panel (apps/web):
+  Framework:  Next.js 14 App Router
+  UI:         shadcn/ui + Tailwind CSS v3 (RTL via tailwindcss-rtl)
+  Charts:     ApexCharts (react-apexcharts) — modern, animated
+  State:      Zustand + TanStack Query v5
+  Forms:      React Hook Form + Zod resolvers
+  Tables:     TanStack Table v8
+  Theme:      next-themes — dark/light toggle, default dark
+  Auth:       NextAuth.js v5 with credentials provider → JWT sessions
+  i18n:       next-intl (all messages in Persian, single locale fa-IR)
+
+Telegram Mini App (apps/miniapp):
+  Framework:  React 18 + Vite 5
+  UI:         shadcn/ui + Tailwind CSS (RTL)
+  SDK:        @twa-dev/sdk (Telegram WebApp API)
+  Routing:    React Router v6
+  Animation:  Framer Motion
+  Theme:      Dark/light following Telegram theme + manual toggle
+  HTTP:       Axios with interceptors — always sends initData header
+
+Shared packages (packages/):
+  packages/db          — Prisma client + schema + migrations
+  packages/3xui        — 3x-ui HTTP client (see §3X-UI INTEGRATION)
+  packages/types       — shared TypeScript types + Zod schemas
+  packages/persian     — Persian date/number utilities + message templates
+  packages/queue       — BullMQ worker/queue definitions
+
+Infrastructure:
+  docker-compose.yml      — dev (postgres, redis, minio, all apps)
+  docker-compose.prod.yml — prod (+ nginx, certbot)
+  Dockerfile per app (multi-stage, non-root user, Alpine base)
+  nginx/                  — reverse proxy config, SSL, security headers
+  .github/workflows/ci.yml — lint + typecheck + test + build
+
+═══════════════════════════════════════════════════
+3X-UI INTEGRATION MODULE  (packages/3xui/src/)
+═══════════════════════════════════════════════════
+
+3x-ui uses cookie-based session authentication.
+The module MUST handle this correctly:
+
+class ThreeXUIClient {
+  private baseUrl: string;        // e.g. https://panel.example.com:2053
+  private sessionCookie: string | null = null;
+  private cookieTTL: number;      // store expiry time
+
+  // Login → POST /login  { username, password }
+  // Response sets a session cookie. Store it in Redis with TTL
+  // matching the panel's session duration (default ~24h).
+  // Key pattern: "3xui:session:{panelId}"
+  async login(): Promise<void>
+
+  // Auto-refresh: before every request, check if cookie is expired
+  // (within 5-minute buffer). Re-login if needed.
+  private async ensureSession(): Promise<void>
+
+  // ─── Inbounds ───────────────────────────────────
+  // GET  /panel/api/inbounds/list
+  async getInbounds(): Promise<Inbound[]>
+
+  // GET  /panel/api/inbounds/{id}
+  async getInbound(id: number): Promise<Inbound>
+
+  // ─── Clients ────────────────────────────────────
+  // POST /panel/api/inbounds/addClient
+  // Body: { id: inboundId, settings: JSON.stringify({ clients: [ClientObject] }) }
+  // ClientObject: { id: uuidv4(), email, totalGB: bytes, expiryTime: ms, enable: true, tgId?, subId? }
+  async addClient(inboundId: number, client: CreateClientDto): Promise<void>
+
+  // POST /panel/api/inbounds/updateClient/{uuid}
+  // Body: same shape as addClient but with existing uuid
+  async updateClient(inboundId: number, uuid: string, data: UpdateClientDto): Promise<void>
+
+  // POST /panel/api/inbounds/{inboundId}/delClient/{uuid}
+  async deleteClient(inboundId: number, uuid: string): Promise<void>
+
+  // GET  /panel/api/inbounds/getClientTraffics/{email}
+  async getClientTraffic(email: string): Promise<ClientTraffic>
+
+  // GET  /panel/api/inbounds/getClientTrafficsById/{id}
+  async getClientTrafficById(id: number): Promise<ClientTraffic>
+
+  // POST /panel/api/inbounds/resetClientTraffic/{email}
+  async resetClientTraffic(email: string): Promise<void>
+
+  // GET  /panel/api/inbounds/getClientIps/{email}
+  async getClientIps(email: string): Promise<string[]>
+
+  // POST /panel/api/inbounds/clearClientIps/{email}
+  async clearClientIps(email: string): Promise<void>
+
+  // ─── Online status ───────────────────────────────
+  // POST /panel/api/inbounds/onlines
+  async getOnlineClients(): Promise<string[]>   // returns list of emails
+
+  // ─── Subscription URL ───────────────────────────
+  // 3x-ui subscription URL format:
+  // {panelBaseUrl}/sub/{clientSubId}
+  // clientSubId is the `subId` field set during addClient (generate as nanoid(16))
+  getSubLink(subId: string): string
+}
+
+IMPORTANT 3x-ui integration rules:
+- Generate client email as: {productCode}-{userId}-{nanoid(8)}
+  (must be unique per inbound, URL-safe, max 32 chars)
+- Generate subId as nanoid(16) — store in our DB as Subscription.subLink
+- totalGB is in BYTES: multiply GB value × 1_073_741_824
+- expiryTime is Unix timestamp in MILLISECONDS: Date.now() + days×86400000
+- If expiryTime = 0, the client never expires
+- Store the 3x-ui panel password encrypted in DB using AES-256-GCM
+  with key from env ENCRYPTION_KEY (32-byte hex string)
+- Support multi-panel: each Product references a panelId;
+  route all 3x-ui calls through the correct client instance
+- Pool panel client instances in a Map<panelId, ThreeXUIClient>
+- On panel connection error, mark panel as OFFLINE in DB + notify admins via bot
+
+═══════════════════════════════════════════════════
+SECURITY REQUIREMENTS (ALL ARE MANDATORY)
+═══════════════════════════════════════════════════
+
+### Input Validation & SQL Injection
+- Every API endpoint has a Zod schema; validation happens in a
+  Fastify preHandler BEFORE any business logic runs
+- Prisma ORM exclusively — zero raw SQL with user input
+- Parameterize the rare raw queries that ARE needed
+- All IDs exposed to clients are UUID v4 — never sequential integers
+- Strip and reject unexpected fields (Zod .strict() on request bodies)
+
+### XSS Prevention
+- All user-generated content stored as plain text, never HTML
+- Bot messages: use grammy's built-in parse_mode='MarkdownV2' safely;
+  escape all user-supplied strings with a dedicated escapeMarkdown()
+  utility before interpolating into messages
+- Web panel: Next.js escapes by default; never use dangerouslySetInnerHTML
+- Mini App: same — React escapes by default; DOMPurify on any raw HTML
+- CSP header (set in Nginx AND in Next.js middleware):
+  default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
+  img-src 'self' data: blob: https:; connect-src 'self' https://api.telegram.org;
+  frame-ancestors 'none';
+
+### CSRF Prevention
+- Web panel uses NextAuth sessions (HttpOnly, Secure, SameSite=Strict)
+- All state-changing web panel API routes validate the CSRF token from
+  NextAuth's built-in CSRF protection
+- Fastify backend exposes API for bot + Mini App only — no cookie auth there;
+  uses Bearer JWT exclusively for those clients
+- Mini App: every request includes the raw initData string in header
+  X-Telegram-Init-Data; server validates HMAC-SHA256 signature:
+    const secret = crypto.createHmac('sha256', 'WebAppData')
+                         .update(BOT_TOKEN).digest();
+    const checkString = Object.entries(parsedInitData)
+      .filter(([k]) => k !== 'hash')
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join('\n');
+    const hash = crypto.createHmac('sha256', secret)
+                       .update(checkString).digest('hex');
+    if (hash !== parsedInitData.hash) throw new UnauthorizedError();
+  Reject initData older than 600 seconds (check auth_date field)
+
+### Authentication & Authorization
+- RBAC roles: SUPER_ADMIN | ADMIN | SUPPORT | USER
+- Bot: check role on every admin command handler
+- Web panel: Next.js middleware checks NextAuth session + role
+- Fastify: JWT middleware extracts userId + role; each route declares
+  required minimum role via a route-level preHandler
+- JWT (RS256): access token TTL = 15 min, refresh token TTL = 30 days
+- Refresh token rotation: on use, old token invalidated, new pair issued
+  Family tracking: store all tokens of a family in Redis; reuse of
+  revoked token → revoke ENTIRE family (token theft detection)
+- Login rate limit: 5 attempts / 15 min / IP (Redis sliding window)
+  On 5th failure: CAPTCHA challenge OR lockout for 15 min
+- Admin login from web panel: require TOTP (2FA) if enabled in settings
+
+### API Security (Fastify)
+- @fastify/helmet: sets X-Content-Type-Options, X-Frame-Options,
+  X-XSS-Protection, Referrer-Policy, Permissions-Policy
+- @fastify/rate-limit: 200 req/15min global per IP; auth routes 5/15min;
+  payment routes 10/hour per userId
+- @fastify/multipart: limit file uploads to 5MB, accept only JPEG/PNG/WebP
+  Validate file magic bytes (not just extension/mimetype header)
+- Request body size: 100KB for JSON, 5MB for multipart
+- Telegram bot webhook: validate X-Telegram-Bot-Api-Secret-Token header
+  Set it in setWebhook call as secretToken = crypto.randomBytes(32).toString('hex')
+  Store in env. Reject any webhook request without valid header.
+- All 3x-ui panel passwords: AES-256-GCM encrypted at rest
+- Env validation at startup: Zod schema checks all required env vars exist
+  and are valid format; crash with descriptive error if invalid
+
+### Audit Logging
+- Every admin action creates an AdminLog record:
+  { adminId, action: enum, targetType, targetId, metadata: JSON, ip, userAgent, ts }
+- Admin actions include: USER_BLOCK, USER_BALANCE_CHANGE, RECEIPT_APPROVE,
+  RECEIPT_REJECT, SUBSCRIPTION_SUSPEND, PRODUCT_CREATE, PRODUCT_EDIT,
+  PANEL_ADD, BROADCAST_SEND, SETTINGS_CHANGE, ADMIN_ADD, ADMIN_REMOVE
+- Audit logs are append-only (never update/delete through app code)
+- Viewable from web admin panel with filter by action, admin, date range
+
+═══════════════════════════════════════════════════
+DATABASE SCHEMA (Prisma — full definition)
+═══════════════════════════════════════════════════
+
+All tables use UUID v4 primary keys. All timestamps UTC DateTime.
+Apply @@index on all foreign keys and frequently filtered columns.
+
+model User {
+  id               String    @id @default(uuid())
+  telegramId       BigInt    @unique          // Telegram user ID
+  username         String?                    // Telegram @username
+  firstName        String
+  lastName         String?
+  phone            String?
+  balance          Decimal   @default(0) @db.Decimal(12,2)
+  role             Role      @default(USER)
+  isBlocked        Boolean   @default(false)
+  isTermsAccepted  Boolean   @default(false)
+  referredById     String?
+  referredBy       User?     @relation("referral", fields: [referredById], references: [id])
+  referrals        User[]    @relation("referral")
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  subscriptions    Subscription[]
+  transactions     Transaction[]
+  tickets          Ticket[]
+  discountCodeUses DiscountCodeUse[]
+  giftCodeUses     GiftCodeUse[]
+}
+
+model Panel {
+  id              String    @id @default(uuid())
+  name            String                      // display name e.g. "سرور آلمان"
+  url             String                      // e.g. https://panel.example.com:2053
+  username        String
+  encryptedPass   String                      // AES-256-GCM encrypted
+  remarkPrefix    String    @default("")      // prefix for client email
+  isActive        Boolean   @default(true)
+  isOnline        Boolean   @default(true)   // updated by health-check job
+  lastCheckedAt   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  products        Product[]
+}
+
+model Product {
+  id           String    @id @default(uuid())
+  panelId      String
+  panel        Panel     @relation(fields: [panelId], references: [id])
+  groupName    String                        // e.g. "آلمان 🇩🇪"
+  name         String                        // e.g. "پلن ۳۰ گیگ یک ماهه"
+  inboundId    Int                           // 3x-ui inbound ID
+  trafficGB    Int                           // e.g. 30
+  durationDays Int                           // e.g. 30
+  price        Decimal   @db.Decimal(12,2)   // in Toman
+  isActive     Boolean   @default(true)
+  sortOrder    Int       @default(0)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id           String             @id @default(uuid())
+  userId       String
+  user         User               @relation(fields: [userId], references: [id])
+  productId    String
+  product      Product            @relation(fields: [productId], references: [id])
+  panelId      String
+  inboundId    Int
+  clientUuid   String                        // UUID used in 3x-ui
+  clientEmail  String                        // email used in 3x-ui
+  subId        String                        // nanoid(16) used for sub link
+  subLink      String                        // full sub URL
+  expiresAt    DateTime?
+  status       SubscriptionStatus @default(ACTIVE)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+model Transaction {
+  id              String            @id @default(uuid())
+  userId          String
+  user            User              @relation(fields: [userId], references: [id])
+  amount          Decimal           @db.Decimal(12,2)
+  type            TransactionType   // CHARGE | PURCHASE | REFUND | GIFT | DISCOUNT
+  status          TransactionStatus @default(PENDING)
+  description     String?
+  metadata        Json?             // e.g. { productId, discountCodeId, ... }
+  paymentReceipt  PaymentReceipt?
+  confirmedAt     DateTime?
+  confirmedById   String?           // admin userId
+  createdAt       DateTime          @default(now())
+
+  @@index([userId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+model PaymentReceipt {
+  id              String          @id @default(uuid())
+  transactionId   String          @unique
+  transaction     Transaction     @relation(fields: [transactionId], references: [id])
+  userId          String
+  imageStoragePath String                     // local path or S3 key
+  imageTelegramFileId String?                 // original Telegram file_id
+  status          ReceiptStatus   @default(PENDING)
+  rejectionReason String?
+  reviewedById    String?
+  reviewedAt      DateTime?
+  createdAt       DateTime        @default(now())
+
+  @@index([status])
+  @@index([createdAt])
+}
+
+model Ticket {
+  id           String        @id @default(uuid())
+  userId       String
+  user         User          @relation(fields: [userId], references: [id])
+  departmentId String
+  department   Department    @relation(fields: [departmentId], references: [id])
+  subject      String
+  status       TicketStatus  @default(OPEN)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  messages     TicketMessage[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+model TicketMessage {
+  id           String        @id @default(uuid())
+  ticketId     String
+  ticket       Ticket        @relation(fields: [ticketId], references: [id])
+  senderId     String
+  senderRole   Role
+  message      String        @db.Text
+  attachments  Json?         // array of storage paths
+  createdAt    DateTime      @default(now())
+
+  @@index([ticketId])
+}
+
+model Department {
+  id        String    @id @default(uuid())
+  name      String                          // Persian name e.g. "پشتیبانی فنی"
+  isActive  Boolean   @default(true)
+  createdAt DateTime  @default(now())
+  tickets   Ticket[]
+}
+
+model DiscountCode {
+  id            String          @id @default(uuid())
+  code          String          @unique      // uppercase, alphanumeric
+  type          DiscountType    // PERCENT | FIXED_AMOUNT
+  value         Decimal         @db.Decimal(10,2)
+  maxUses       Int?                         // null = unlimited
+  usedCount     Int             @default(0)
+  validFrom     DateTime?
+  validTo       DateTime?
+  applicableTo  DiscountTarget  // ALL | NEW_PURCHASE | RENEWAL | FIRST_PURCHASE
+  isActive      Boolean         @default(true)
+  createdAt     DateTime        @default(now())
+  uses          DiscountCodeUse[]
+}
+
+model DiscountCodeUse {
+  id             String       @id @default(uuid())
+  discountCodeId String
+  discountCode   DiscountCode @relation(fields: [discountCodeId], references: [id])
+  userId         String
+  user           User         @relation(fields: [userId], references: [id])
+  transactionId  String
+  usedAt         DateTime     @default(now())
+
+  @@unique([discountCodeId, userId])     // one use per user per code
+}
+
+model GiftCode {
+  id        String       @id @default(uuid())
+  code      String       @unique
+  amount    Decimal      @db.Decimal(10,2)  // Toman to add to wallet
+  maxUses   Int?
+  usedCount Int          @default(0)
+  isActive  Boolean      @default(true)
+  createdAt DateTime     @default(now())
+  uses      GiftCodeUse[]
+}
+
+model GiftCodeUse {
+  id         String    @id @default(uuid())
+  giftCodeId String
+  giftCode   GiftCode  @relation(fields: [giftCodeId], references: [id])
+  userId     String
+  user       User      @relation(fields: [userId], references: [id])
+  usedAt     DateTime  @default(now())
+
+  @@unique([giftCodeId, userId])
+}
+
+model ForceJoinChannel {
+  id              String   @id @default(uuid())
+  channelId       BigInt                        // Telegram channel ID (negative)
+  channelUsername String                        // @username without @
+  channelTitle    String
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+}
+
+// All editable Persian UI strings stored here — admin can edit from panel
+model BotMessage {
+  key       String   @id                        // e.g. "welcome", "purchase_success"
+  content   String   @db.Text                   // MarkdownV2 safe text
+  updatedAt DateTime @updatedAt
+}
+
+model AdminLog {
+  id          String      @id @default(uuid())
+  adminId     String
+  action      AdminAction
+  targetType  String?                           // e.g. "User", "Subscription"
+  targetId    String?
+  metadata    Json?
+  ipAddress   String
+  userAgent   String?
+  createdAt   DateTime    @default(now())
+
+  @@index([adminId])
+  @@index([action])
+  @@index([createdAt])
+}
+
+model Setting {
+  key       String   @id
+  value     String   @db.Text
+  updatedAt DateTime @updatedAt
+}
+
+// Default settings seed:
+// payment.card_number, payment.card_holder, payment.card_bank
+// bot.test_account_enabled, bot.test_traffic_gb, bot.test_duration_days
+// bot.maintenance_mode
+// store.min_charge_amount, store.max_charge_amount
+
+Enums: Role, SubscriptionStatus, TransactionType, TransactionStatus,
+ReceiptStatus, TicketStatus, DiscountType, DiscountTarget, AdminAction
+
+═══════════════════════════════════════════════════
+TELEGRAM BOT  (apps/server — grammy)
+═══════════════════════════════════════════════════
+
+Use grammy with conversations plugin for multi-step flows.
+Use InlineKeyboard for all interactive buttons.
+Use session middleware (Redis-backed) to store per-user state.
+Implement a centralized message renderer that fetches text from
+BotMessage table (cached in Redis with 60s TTL) and supports
+MarkdownV2 template variables: {{balance}}, {{name}}, {{expiry}}, etc.
+
+All Persian message keys and their default values must be in a seed
+file (packages/persian/src/defaultMessages.ts) so the DB can be
+re-seeded at any time.
+
+──────────────────────────────────────────────────
+USER FLOW ON /start
+──────────────────────────────────────────────────
+1. Upsert user record (telegramId, firstName, lastName, username)
+2. If !isTermsAccepted:
+   → Send "terms" message (from BotMessage['terms']) with one button:
+     [✅ قوانین را می‌پذیرم و ادامه می‌دهم]
+   → On button press: set isTermsAccepted=true, continue to step 3
+   → Without acceptance: every message → resend terms prompt
+3. Force-join check:
+   → Fetch active ForceJoinChannels from DB (Redis cached, 30s TTL)
+   → For each: call bot.api.getChatMember(channelId, userId)
+   → If any status = 'left'|'kicked': send join prompt with buttons:
+     [عضویت در کانال] (url to t.me/channel) + [✅ عضو شدم (بررسی)]
+   → On "عضو شدم": re-check membership → if still not joined: error msg
+4. Show main menu
+
+──────────────────────────────────────────────────
+MAIN MENU (InlineKeyboard 2×2 + 1)
+──────────────────────────────────────────────────
+🛒 خرید سرویس جدید   |  📋 سرویس‌های من
+📚 آموزش‌ها           |  🎫 تیکت پشتیبانی
+        👤 پروفایل و کیف پول
+
+──────────────────────────────────────────────────
+🛒 خرید سرویس جدید
+──────────────────────────────────────────────────
+Step 1 — Product group selection
+  → Query active Products, group by groupName
+  → Show one button per group (e.g. "🇩🇪 آلمان", "🇳🇱 هلند")
+
+Step 2 — Product selection
+  → List products in group: name + price + traffic + duration
+  → E.g. "📦 پلن ۳۰ گیگ | ۳۰ روزه | ۱۵۰,۰۰۰ تومان"
+  → [خرید] button per product + [🔙 بازگشت]
+
+Step 3 — Discount/gift code (optional)
+  → Ask: "کد تخفیف یا هدیه دارید؟"
+  → Buttons: [✅ بله، وارد می‌کنم] [❌ خیر، ادامه]
+  → If yes: conversation.form.text() to get code
+    Validate: check DiscountCode or GiftCode
+    Show applied discount: "✅ ۱۵٪ تخفیف اعمال شد"
+    Show new price
+
+Step 4 — Payment method selection
+  → Currently only: [💳 کارت به کارت]
+  → (Architecture must allow adding payment gateways later as plugins)
+
+Step 5 — Card-to-card payment flow (conversation)
+  → Fetch card info from Settings
+  → Send message:
+    "💳 برای پرداخت مبلغ {{amount}} تومان به شماره کارت زیر واریز کنید:
+     {{cardNumber}}
+     به نام: {{cardHolder}} — {{cardBank}}
+     ⏱ لطفاً در ۱۵ دقیقه پس از واریز، تصویر رسید را ارسال کنید."
+  → conversation.waitFor(':photo') with 15-minute timeout
+  → On photo: download file_id, save to storage, create Transaction
+    (status=PENDING) + PaymentReceipt
+  → Notify all admins (role ADMIN+) in their own chat:
+    Send receipt image + caption:
+    "🧾 رسید پرداخت جدید
+     👤 کاربر: {{name}} (@{{username}})
+     💰 مبلغ: {{amount}} تومان
+     📦 محصول: {{productName}}"
+    InlineKeyboard: [✅ تایید] [❌ رد] (callback with transactionId)
+  → Tell user: "✅ رسید دریافت شد. پس از تایید ادمین، سرویس فعال می‌شود."
+  → On timeout: cancel transaction, notify user
+
+Step 6 — Admin approves receipt
+  → Admin clicks ✅ تایید on the notification:
+    - Mark Transaction CONFIRMED, PaymentReceipt APPROVED
+    - Call ThreeXUIClient.addClient() for the correct panel/inbound
+    - Create Subscription record
+    - Send sub link + QR code to user:
+      "🎉 سرویس شما فعال شد!
+       🔗 لینک اشتراک: {{subLink}}
+       📅 انقضا: {{expiryJalali}}
+       📊 ترافیک: {{trafficGB}} گیگابایت"
+    - Send QR code as photo (use qrcode npm package)
+  → On ❌ رد: ask admin to send rejection reason (conversation),
+    then notify user with reason
+
+──────────────────────────────────────────────────
+📋 سرویس‌های من
+──────────────────────────────────────────────────
+→ Query user's active Subscriptions
+→ For each: fetch live traffic from ThreeXUIClient.getClientTraffic(email)
+→ Show list with:
+  "📦 {{productName}}
+   📊 مصرف: {{used}} از {{total}} گیگابایت ({{percent}}%)
+   📅 انقضا: {{expiryJalali}}
+   🔘 وضعیت: {{status}}"
+→ Per service InlineKeyboard:
+  [🔗 لینک اتصال] [📷 کد QR] [🔄 تمدید] [⬆️ افزایش حجم]
+→ لینک اتصال: send subLink as text (copyable)
+→ کد QR: generate QR from subLink, send as photo
+→ تمدید: go to purchase flow pre-selected on same product
+→ افزایش حجم: show traffic top-up options (separate products or fixed amounts)
+
+──────────────────────────────────────────────────
+📚 آموزش‌ها
+──────────────────────────────────────────────────
+→ Multi-level menu from BotMessage table:
+  Keys: tutorial.menu, tutorial.windows, tutorial.android,
+        tutorial.ios, tutorial.macos, tutorial.linux
+→ Support text + photo or video (store Telegram file_id in BotMessage)
+→ Each tutorial page has [🔙 بازگشت] button
+
+──────────────────────────────────────────────────
+🎫 تیکت پشتیبانی
+──────────────────────────────────────────────────
+→ Show: open tickets list (max 10, paginated) + [❓ سوالات متداول]
+        + [➕ تیکت جدید]
+→ سوالات متداول: paginated FAQ from BotMessage (key prefix: faq.*)
+→ تیکت جدید conversation:
+  1. Select department (buttons from active Departments)
+  2. Enter subject (text)
+  3. Enter message (text, optional photo)
+  → Create Ticket + TicketMessage
+  → Notify SUPPORT+ admins with department name + subject + user info
+→ View existing ticket: show thread, [↩️ پاسخ] button
+  → On reply: create TicketMessage, notify user if admin replied
+
+──────────────────────────────────────────────────
+👤 پروفایل و کیف پول
+──────────────────────────────────────────────────
+Show:
+  "👤 پروفایل شما
+   🆔 شناسه: {{userId}}
+   💰 موجودی کیف پول: {{balance}} تومان
+   📦 سرویس‌های فعال: {{activeCount}}
+   📅 عضویت از: {{joinDateJalali}}"
+
+Buttons:
+  [💰 شارژ کیف پول]  → charge flow (same receipt flow, type=CHARGE)
+  [🎁 کد هدیه]       → enter gift code → validate → add to balance
+  [🏷️ کد تخفیف]     → show discount code info (used in purchase)
+  [📜 تاریخچه تراکنش‌ها] → paginated list of transactions
+
+──────────────────────────────────────────────────
+ADMIN PANEL IN BOT
+──────────────────────────────────────────────────
+Shown only when user.role >= ADMIN.
+Persistent keyboard (ReplyKeyboard) for admins with:
+  📊 داشبورد | 👥 کاربران | 🧾 رسیدهای در انتظار
+  📢 پیام گروهی | 🏷️ محصولات | ⚙️ تنظیمات
+
+📊 داشبورد:
+  Fetch and display:
+  - کل کاربران: {{totalUsers}}
+  - کاربران جدید: امروز {{today}} | هفته {{week}} | ماه {{month}}
+  - سرویس‌های فعال: {{activeSubscriptions}}
+  - موجودی کل کیف‌پول‌ها: {{totalBalance}} تومان
+  - فروش ۳۰ روز: {{sales30d}} تومان ({{count30d}} سرویس)
+  - فروش ۹۰ روز: {{sales90d}} تومان ({{count90d}} سرویس)
+  - فروش ۱۸۰ روز: {{sales180d}} تومان ({{count180d}} سرویس)
+  - نرخ تبدیل: {{conversionRate}}%
+    (users with ≥1 confirmed purchase / total users × 100)
+  - بازه‌های جدید: دیروز، ۳ روز، ۷ روز، ۱ ماه، ۲ ماه، ۳ ماه
+
+🧾 رسیدهای در انتظار:
+  List pending PaymentReceipts, sorted oldest first
+  Each: send photo + info + [✅ تایید] [❌ رد] (same as auto-notification)
+
+👥 کاربران — search by:
+  /user {telegramId or @username or name}
+  Show full profile:
+    balance, role, services, join date, block status
+  Inline buttons:
+    [➕ افزایش موجودی] [➖ کاهش موجودی]
+    [🚫 بلاک کردن] / [✅ رفع بلاک]
+    [📩 ارسال پیام] [📋 سرویس‌ها] [📜 تراکنش‌ها]
+  balance change: ask for amount + reason → create Transaction(REFUND or CHARGE)
+
+📢 پیام گروهی (SUPER_ADMIN only):
+  1. Choose target: [همه کاربران] [کاربران دارای سرویس فعال]
+                    [کاربران بدون سرویس فعال]
+  2. Enter message (text + optional photo)
+  3. Confirm with count: "پیام به {{count}} کاربر ارسال خواهد شد. تایید؟"
+  4. Queue broadcast job in BullMQ (process 20/second to avoid flood)
+
+⚙️ تنظیمات:
+  [📝 ویرایش پیام‌های ربات]  → list BotMessage keys → edit each
+  [💳 تنظیمات پرداخت]       → edit card number, holder, bank
+  [📣 کانال‌های اجباری]      → add/remove ForceJoinChannel
+  [🖥️ مدیریت پنل‌ها]        → add/test/delete 3x-ui panels
+  [🏷️ کدهای تخفیف و هدیه]   → CRUD for codes
+  [🏢 دپارتمان‌ها]           → CRUD for ticket departments
+
+═══════════════════════════════════════════════════
+WEB ADMIN PANEL  (apps/web — Next.js 14)
+═══════════════════════════════════════════════════
+
+Layout: sidebar navigation (collapsible on mobile), RTL, dark default.
+Use shadcn/ui Sidebar component. All route names in Persian.
+
+/admin/login
+  Credentials form. On success: NextAuth session with role.
+  If SUPER_ADMIN has TOTP enabled: redirect to /admin/login/2fa.
+  Rate limit login: 5 attempts/15min/IP (middleware, Redis).
+
+/admin/dashboard
+  KPI cards row:
+    کل کاربران | سرویس‌های فعال | درآمد این ماه | رسیدهای در انتظار
+  Charts (ApexCharts, Persian labels, Jalali x-axis):
+    1. Line chart — daily revenue (last 30d, 90d selectable)
+    2. Bar chart — new users per day (last 30d)
+    3. Donut chart — revenue by product group (top 5 + other)
+    4. Area chart — active subscriptions trend
+  Table: last 10 transactions (real-time via React Query 30s refetch)
+  Panel status indicators: each panel with online/offline badge
+
+/admin/users
+  TanStack Table with server-side pagination, search, filters:
+    Filter by: role, isBlocked, has active service, date range
+  Columns: شناسه | نام | یوزرنیم | موجودی | سرویس‌ها | تاریخ عضویت | وضعیت | عملیات
+  Row actions dropdown: ویرایش | بلاک | ارسال پیام | جزئیات
+  User detail drawer (side panel):
+    Tabs: اطلاعات | سرویس‌ها | تراکنش‌ها | تیکت‌ها | لاگ ادمین
+    - Edit: balance (with reason), role, block status
+    - Services tab: live data from 3x-ui via our API
+      Actions per service: تعلیق | بازگردانی | حذف | ریست ترافیک
+    - Transactions: filterable, with status badges
+    - Send message: textarea → sends via bot.api.sendMessage
+
+/admin/subscriptions
+  All subscriptions, server-side paginated.
+  Filters: panel, product, status (ACTIVE/EXPIRED/SUSPENDED), date range
+  Columns: کاربر | محصول | سرور | ترافیک مصرفی | انقضا | وضعیت | عملیات
+  Live traffic percentage bar in the traffic column.
+  Row actions: تعلیق | بازگردانی | تمدید | حذف از پنل
+
+/admin/products
+  Grouped by panel/server.
+  Drag-and-drop sort within each group (react-beautiful-dnd or @dnd-kit).
+  Create/Edit form (shadcn Sheet):
+    - Panel (select from active panels)
+    - Inbound ID (populated by fetching panel inbounds via our API)
+    - Group name (text, Persian)
+    - Product name (text, Persian)
+    - Traffic (GB), Duration (days), Price (Toman)
+    - Active toggle
+  Delete with confirmation dialog.
+
+/admin/panels
+  Cards layout, one card per panel.
+  Card shows: name, URL, status badge (online/offline + last checked),
+    active products count, total active clients.
+  Add panel: form with name, URL, username, password
+    → on submit: test connection (call ThreeXUIClient.login()) → show result
+    → on success: save with encrypted password
+  Edit: same form (password field shows "••••••" with option to change)
+  Delete: only if no active subscriptions on this panel (check first)
+  "Sync Inbounds" button: fetch current inbounds and cache in Redis
+
+/admin/finance
+  Tabs: رسیدهای در انتظار | تاریخچه تراکنش‌ها | تحلیل مالی
+
+  رسیدهای در انتظار:
+    Split view: list on left, image viewer on right.
+    Click receipt → show full-size image.
+    [✅ تایید] [❌ رد با دلیل] buttons.
+    On approve: trigger same logic as bot approval.
+
+  تاریخچه تراکنش‌ها:
+    Full table with filters + CSV export (using json2csv or papaparse).
+    Filter: user, type, status, date range.
+
+  تحلیل مالی:
+    - Revenue by period (selectable: day/week/month/quarter)
+    - Revenue by product (bar chart)
+    - Average order value trend
+    - Top 10 customers by lifetime value
+
+/admin/tickets
+  Kanban or table view toggle.
+  Table: دپارتمان | موضوع | کاربر | وضعیت | آخرین پیام | تاریخ
+  Status: OPEN (red badge) | ANSWERED (yellow) | CLOSED (gray)
+  Ticket detail page (/admin/tickets/[id]):
+    Chat-style message thread (RTL, user messages right-aligned).
+    Reply form with optional file attach.
+    [بستن تیکت] [بازگشایی تیکت] buttons.
+    On admin reply: save TicketMessage + send bot notification to user.
+
+  Department management (drawer): add/rename/toggle active.
+
+/admin/discounts
+  Tabs: کدهای تخفیف | کدهای هدیه
+  CRUD for both.
+  Code generator button (random alphanumeric, uppercase, 8 chars).
+  Usage stats per code: نفر استفاده کرده / ظرفیت.
+  Bulk deactivate expired codes button.
+
+/admin/broadcast
+  Target selector: همه | دارای سرویس فعال | بدون سرویس
+  Shows estimated count after target selection.
+  Message composer: textarea + image upload.
+  Preview card (shows what user will see in bot).
+  Send button → confirm dialog with count → queue BullMQ job.
+  History table: date | target | message preview | sent count | status.
+
+/admin/settings
+  Sections (tabs):
+    پیام‌های ربات: searchable list of BotMessage keys (grouped by prefix)
+      Each row: key | preview (first 60 chars) | [ویرایش]
+      Edit modal: textarea with MarkdownV2 guide link, live preview panel.
+    پرداخت: card number, holder name, bank name + save.
+    کانال‌های اجباری: list + add (username input → fetch channel info via API)
+                      + remove.
+    ادمین‌ها (SUPER_ADMIN only): list of admins, add new (by Telegram ID),
+      change role, remove.
+    لاگ ادمین‌ها: filterable audit log table (who/what/when/ip).
+    تنظیمات فروشگاه: maintenance mode toggle, min/max wallet charge.
+
+═══════════════════════════════════════════════════
+TELEGRAM MINI APP  (apps/miniapp)
+═══════════════════════════════════════════════════
+
+Entry point: bot's Menu Button → opens https://miniapp.yourdomain.com
+Auth: on open, send Telegram.WebApp.initData to our API endpoint
+  POST /api/miniapp/auth → validate HMAC → return JWT access token
+  Store JWT in memory (never localStorage — use React context/Zustand)
+
+Bottom tab navigation (5 tabs, RTL order right-to-left):
+  پروفایل | تیکت | سرویس‌ها | خرید | 🏠 خانه
+
+Colors: use Telegram.WebApp.themeParams as CSS variables;
+additional custom dark/light toggle stored in React state.
+All transitions: Framer Motion (slide + fade).
+Pull-to-refresh: on service list and ticket list.
+Haptic feedback: Telegram.WebApp.HapticFeedback on button presses.
+Skeleton loaders on all async data.
+Toast notifications (react-hot-toast, Persian text, RTL).
+
+🏠 خانه:
+  Hero card: خوش آمدید، {{firstName}} 👋
+  Balance card: موجودی: {{balance}} تومان  [شارژ کیف پول ←]
+  Active services summary: {{count}} سرویس فعال  [مشاهده ←]
+  Quick action grid: [خرید سرویس] [سرویس‌هایم] [پشتیبانی] [آموزش‌ها]
+  Latest transaction (last 3, minimal view)
+
+🛒 خرید:
+  Product groups as horizontal scrollable pills (filter).
+  Product cards: name, traffic, duration, price, [خرید] button.
+  Product detail bottom sheet: full info + discount code input + [ادامه].
+  Payment step: show card info + [ارسال رسید پرداخت].
+    → use Telegram.WebApp.showScanQrPopup? No — just native file picker.
+    → <input type="file" accept="image/*" capture="environment"> for camera.
+    → Upload to our API as multipart form.
+  Confirmation step: "رسید دریافت شد، در انتظار تایید ادمین..."
+
+📋 سرویس‌ها:
+  Card per service: name, circular traffic progress chart (SVG),
+    expiry date (Jalali), status badge.
+  Tap card → service detail bottom sheet:
+    Full stats + subLink (tap to copy) + QR code (canvas).
+    Buttons: [تمدید] [افزایش حجم]
+
+🎫 تیکت:
+  Active tickets list → tap to open thread view (chat style).
+  Floating [+] button → create ticket flow:
+    Department select (bottom sheet) → subject → message → send.
+  FAQ tab: accordion list from BotMessage(faq.* keys).
+
+👤 پروفایل:
+  Avatar (Telegram photo if available, else initials avatar).
+  User info + stats.
+  Transaction history (lazy-loaded, infinite scroll).
+  [شارژ کیف پول]: opens mini payment flow (same as purchase).
+  [وارد کردن کد هدیه]: text input + submit.
+  Theme toggle: ☀️ / 🌙
+
+═══════════════════════════════════════════════════
+BACKGROUND JOBS  (BullMQ — apps/server/src/jobs/)
+═══════════════════════════════════════════════════
+
+expiry-notifier (every hour):
+  Query subscriptions expiring in exactly 3 days, 1 day, 6 hours.
+  For each: fetch live traffic from 3x-ui, send personalized bot message:
+  "⏰ سرویس شما {{productName}} تا {{timeLeft}} دیگر منقضی می‌شود.
+   📊 ترافیک باقی‌مانده: {{remaining}} گیگابایت
+   [🔄 تمدید سرویس]"
+
+traffic-notifier (every 2 hours):
+  Query active subscriptions.
+  Fetch traffic for each in batches (concurrent limit: 5 per panel).
+  Send warning at 80% and 95% usage (track sent warnings in Redis to avoid repeats):
+  "⚠️ {{percent}}% از ترافیک سرویس {{productName}} مصرف شده است."
+
+panel-health-check (every 3 minutes):
+  Ping each active panel.
+  On failure (3x in a row): mark isOnline=false, notify SUPER_ADMINs.
+  On recovery: mark isOnline=true, notify.
+
+pending-receipt-reminder (every 30 minutes):
+  Count pending receipts older than 30 minutes.
+  If count > 0: notify ADMIN+ users in bot.
+
+broadcast-worker:
+  Process jobs from broadcast queue.
+  Send 20 messages/second (respect Telegram rate limits).
+  Track success/fail counts, update broadcast history record.
+
+subscription-expiry-handler (every hour):
+  Find subscriptions where expiresAt < now AND status=ACTIVE.
+  Mark as EXPIRED. Do NOT delete from 3x-ui automatically
+  (keep config for 7 days in case of renewal).
+  After 7 days past expiry: call ThreeXUIClient.deleteClient() → clean up.
+
+═══════════════════════════════════════════════════
+NGINX CONFIGURATION  (docker/nginx/)
+═══════════════════════════════════════════════════
+
+Domains served:
+  panel.yourdomain.com  → Next.js admin web panel (port 3000)
+  bot.yourdomain.com    → Fastify backend (port 3001) [webhook endpoint]
+  miniapp.yourdomain.com → Mini App Vite build (port 3002, static)
+
+Security headers (all domains):
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY (except miniapp: ALLOW-FROM https://web.telegram.org)
+  X-XSS-Protection: 1; mode=block
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=()
+
+For miniapp domain, allow iframing from Telegram:
+  Content-Security-Policy: frame-ancestors https://web.telegram.org;
+
+Disable server_tokens, disable nginx version exposure.
+SSL: Let's Encrypt via Certbot, auto-renewal.
+Gzip: enable for text/html, text/css, application/javascript, application/json.
+
+═══════════════════════════════════════════════════
+ENVIRONMENT VARIABLES  (.env.example)
+═══════════════════════════════════════════════════
+
+# Database
+DATABASE_URL="postgresql://user:pass@localhost:5432/vitoribot"
+
+# Redis
+REDIS_URL="redis://localhost:6379"
+
+# Security
+ENCRYPTION_KEY="64-char-hex-string-for-AES-256"
+JWT_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
+JWT_PUBLIC_KEY="-----BEGIN PUBLIC KEY-----\n..."
+
+# Telegram
+BOT_TOKEN="1234567890:ABC..."
+WEBHOOK_SECRET="64-char-random-hex"
+BOT_WEBHOOK_URL="https://bot.yourdomain.com/webhook"
+MINIAPP_URL="https://miniapp.yourdomain.com"
+
+# Storage
+STORAGE_TYPE="local"  # or "s3"
+STORAGE_LOCAL_PATH="/app/uploads"
+MINIO_ENDPOINT=""
+MINIO_ACCESS_KEY=""
+MINIO_SECRET_KEY=""
+MINIO_BUCKET=""
+
+# App
+NODE_ENV="production"
+LOG_LEVEL="info"
+API_PORT=3001
+WEB_PORT=3000
+
+═══════════════════════════════════════════════════
+MONOREPO STRUCTURE
+═══════════════════════════════════════════════════
+
+vitoribot/
+├── apps/
+│   ├── server/                   # Fastify backend + grammy bot
+│   │   ├── src/
+│   │   │   ├── bot/
+│   │   │   │   ├── handlers/     # command + callback handlers
+│   │   │   │   ├── conversations/ # multi-step flows
+│   │   │   │   ├── keyboards/    # reusable InlineKeyboard builders
+│   │   │   │   └── middleware/   # auth, session, terms, force-join
+│   │   │   ├── api/
+│   │   │   │   ├── routes/       # Fastify route definitions
+│   │   │   │   ├── controllers/  # thin — call services only
+│   │   │   │   ├── services/     # business logic
+│   │   │   │   ├── middleware/   # JWT, CSRF, rate-limit, upload
+│   │   │   │   └── schemas/      # Zod schemas per endpoint
+│   │   │   ├── jobs/             # BullMQ workers
+│   │   │   ├── lib/
+│   │   │   │   ├── encryption.ts
+│   │   │   │   ├── telegram-init.ts  # initData validator
+│   │   │   │   └── jalali.ts         # date helpers
+│   │   │   └── main.ts
+│   ├── web/                      # Next.js admin panel
+│   │   ├── app/
+│   │   │   ├── (auth)/login/
+│   │   │   └── admin/
+│   │   │       ├── dashboard/
+│   │   │       ├── users/
+│   │   │       ├── subscriptions/
+│   │   │       ├── products/
+│   │   │       ├── panels/
+│   │   │       ├── finance/
+│   │   │       ├── tickets/
+│   │   │       ├── discounts/
+│   │   │       ├── broadcast/
+│   │   │       └── settings/
+│   │   ├── components/
+│   │   │   ├── ui/               # shadcn components
+│   │   │   ├── charts/           # ApexCharts wrappers
+│   │   │   └── layout/           # sidebar, header, breadcrumb
+│   │   └── lib/
+│   └── miniapp/                  # React + Vite
+│       ├── src/
+│       │   ├── pages/            # Home, Buy, Services, Ticket, Profile
+│       │   ├── components/
+│       │   │   ├── ui/
+│       │   │   ├── service-card/
+│       │   │   ├── product-card/
+│       │   │   └── ticket-thread/
+│       │   ├── store/            # Zustand stores
+│       │   ├── hooks/
+│       │   └── api/              # Axios client + query hooks
+├── packages/
+│   ├── db/                       # Prisma schema + client + seed
+│   ├── 3xui/                     # ThreeXUIClient class
+│   ├── types/                    # Shared TypeScript types
+│   ├── persian/                  # i18n, Jalali, defaultMessages.ts
+│   └── queue/                    # BullMQ queue/worker definitions
+├── docker/
+│   ├── nginx/
+│   │   ├── nginx.conf
+│   │   └── sites/
+│   ├── postgres/
+│   │   └── init.sql
+│   └── redis/
+│       └── redis.conf
+├── docker-compose.yml
+├── docker-compose.prod.yml
+├── .env.example
+├── turbo.json                    # Turborepo pipeline
+├── package.json                  # npm workspaces root
+└── README.fa.md                  # Persian setup & usage documentation
+
+═══════════════════════════════════════════════════
+IMPLEMENTATION ORDER & INSTRUCTIONS
+═══════════════════════════════════════════════════
+
+Build in this exact sequence — each phase must be complete and tested
+before moving to the next:
+
+Phase 1 — Foundation
+  1. Repository structure + turbo.json + root package.json
+  2. packages/db: full Prisma schema + all enum types + seed script
+     Seed: default BotMessage keys with Persian defaults, default
+     Departments (پشتیبانی فنی / امور مالی / سوالات عمومی),
+     one SUPER_ADMIN setting placeholder
+  3. packages/types: all shared Zod schemas + TypeScript types
+  4. packages/persian: message templates + Jalali utilities
+  5. packages/3xui: ThreeXUIClient with full implementation
+  6. Security middleware stack in apps/server:
+     helmet, rate-limit, CSRF, JWT auth, initData validator
+
+Phase 2 — Bot Core
+  7. grammy bot setup, webhook registration, session middleware
+  8. Force-join + terms acceptance middleware
+  9. Main menu + all user-facing handlers + conversations
+  10. Admin notification system (receipt alerts, ticket alerts)
+  11. Admin bot panel (all commands)
+
+Phase 3 — Background Jobs
+  12. All BullMQ workers
+
+Phase 4 — REST API (for web panel + mini app)
+  13. All Fastify routes with Zod validation
+  14. File upload endpoint for receipts
+
+Phase 5 — Web Admin Panel
+  15. NextAuth setup + login page
+  16. Layout (sidebar, RTL, dark theme)
+  17. Dashboard page with all charts
+  18. All other admin pages
+
+Phase 6 — Mini App
+  19. Vite + React setup + Telegram SDK integration
+  20. All pages with animations + haptics
+
+Phase 7 — Infrastructure
+  21. Dockerfiles (all apps, non-root, Alpine)
+  22. Docker Compose (dev + prod)
+  23. Nginx config with all security headers
+  24. GitHub Actions CI
+
+═══════════════════════════════════════════════════
+CODING RULES (ABSOLUTE)
+═══════════════════════════════════════════════════
+- TypeScript strict mode: noImplicitAny, strictNullChecks, noUncheckedIndexedAccess
+- Every async function wrapped in try/catch with typed errors
+- Service layer: controllers/handlers call services, services call repositories
+- Zero business logic in route handlers or bot command handlers
+- Zero raw SQL with user input — Prisma only
+- Never log: passwords, JWT tokens, card numbers, Telegram bot tokens
+- All secrets via env — zero hardcoded values anywhere
+- Graceful shutdown: listen for SIGTERM, drain BullMQ, close Prisma
+- ESLint + Prettier configured with RTL-aware rules
+- Tests: Vitest for unit tests on all service methods
+- Every new feature needs at minimum one integration test

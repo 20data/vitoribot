@@ -1,0 +1,163 @@
+# VitoriBot — Progress Log
+
+Purpose: track what was done each session so work can resume later.
+Spec source: `mainprompt.txt` (1115 lines). Language rule: user-facing Persian, code/comments English.
+
+## Session 1 — 2026-09-06
+- Read `mainprompt.txt` fully (spec: Fastify+grammy+Next.js+MiniApp monorepo, 7 phases).
+- Environment check: Node v24.20.0, npm 11.19.0, empty workspace (only mainprompt.txt).
+- Created this `progress.txt`.
+- START Phase 1 Foundation:
+  - [x] 1. Repo structure + turbo.json + root package.json
+  - [x] 2. packages/db Prisma schema + seed
+  - [x] 3. packages/types Zod schemas
+  - [x] 4. packages/persian utilities + defaultMessages
+  - [x] 5. packages/3xui client
+  - [x] 6. Server security middleware stack
+- Status: Phase 1 DONE and verified (see below).
+
+### Files created this session:
+- package.json, turbo.json, tsconfig.base.json, .env.example, .gitignore, .prettierrc, .eslintrc.json
+- packages/db/{package.json,tsconfig.json,prisma/schema.prisma,src/index.ts,src/seed.ts}
+- packages/types/{package.json,tsconfig.json,src/index.ts}
+- packages/persian/{package.json,tsconfig.json,src/index.ts,src/defaultMessages.ts,src/index.test.ts}
+- packages/3xui/{package.json,tsconfig.json,src/index.ts}
+- packages/queue/{package.json,tsconfig.json,src/index.ts}
+- apps/server/{package.json,tsconfig.json,src/main.ts,src/lib/env.ts,src/lib/encryption.ts,src/lib/telegram-init.ts,src/lib/lib.test.ts,src/api/middleware/auth.ts,src/api/middleware/upload.ts}
+
+### Verification (Session 1):
+- `npm install` OK (316 packages).
+- `prisma generate` OK.
+- `tsc --noEmit` OK for types, persian (added @types/jalaali-js), 3xui, queue, db, server.
+- `node dist/main.js` smoke test: GET /health → {"ok":true}.
+- `vitest run`: persian 5/5 passed, server 2/2 passed.
+- Note: Broadcast model added to Prisma schema (spec implies broadcast history; needed by Phase 2/3).
+
+## NEXT (Session 2) — Phase 2 Bot Core:
+1. grammy bot setup + webhook registration + Redis session middleware.
+2. Terms + force-join middleware, main menu keyboards.
+3. User flows: purchase conversation (card-to-card + receipt upload), my-services, tutorials, tickets, profile/wallet.
+4. Admin notifications + admin bot panel commands.
+5. Message renderer from BotMessage table (Redis 60s cache, MarkdownV2 vars).
+
+## Session 2 — 2026-09-06 — Phase 2 Bot Core DONE
+- Deps: @grammyjs/conversations@2.1.1, @grammyjs/menu@1.5.0, nanoid, qrcode (+@types/qrcode); server set to `"type": "module"`.
+- Core: lib/redis.ts (shared Redis, RedisSessionStorage, cached/invalidate), bot/types.ts (SessionData drafts), bot/renderer.ts (DB BotMessage + 60s cache + DEFAULT_MESSAGES fallback + renderSafe), bot/keyboards.ts (all Persian InlineKeyboards + admin reply keyboard).
+- Services: users (upsert/terms/roles), panels (pool, decrypt, offline/online, email+expiry helpers), pricing (discount quote + gift redeem), storage (Telegram photo → local disk), receipts (approve → 3x-ui provision + subscription; reject + audit), stats (dashboard aggregates), notify (admin/support/receipt alerts).
+- Conversations: purchase (card info → 15-min photo wait → tx+receipt → admin notify), charge, new-ticket, reply-ticket, reject-reason, balance-change, broadcast (→ BullMQ queue), direct-message.
+- Handlers: start, navigation (groups/products/menu/tutorials), buy (discount yes/no, pay-card), services (live traffic, sub link, QR, renew), profile (wallet charge/gift/history), tickets (FAQ/list/new/view/reply), receipts (approve w/ QR to user / reject), admin (dashboard, pending receipts, /user lookup, block, balance, msg, services, txns, broadcast targets, products list, payment settings edit, maintenance toggle, force-join CRUD, panel add wizard + test), textState (discount/gift/setting/channel/panel-add wizard).
+- Middleware order: session → conversations → guard (terms/force-join/maintenance) → handlers.
+- main.ts: webhook route → bot.handleUpdate, setWebhook on boot (best-effort), graceful shutdown (bot.stop, prisma, redis).
+- Fixes: ConversationFlavor<BaseContext> generic, form.text() returns string (conversations v2), editMessageCaption({caption}), remove_keyboard literal type.
+
+### Verification (Session 2):
+- `tsc --noEmit` clean.
+- `vitest`: server 7/7 passed (keyboards Persian labels, receipt callbacks, panel helpers + 2 lib tests).
+- Boot smoke: /health {"ok":true}, POST /webhook without secret → 401.
+- Note: discount/gift-code full CRUD + departments CRUD deferred to web panel (Phase 5); bot covers create-free minimal paths. Broadcast enqueue works; worker arrives in Phase 3.
+
+## NEXT (Session 3) — Phase 3 Background Jobs:
+1. BullMQ workers: expiry-notifier, traffic-notifier, panel-health-check, pending-receipt-reminder, broadcast-worker, subscription-expiry-handler.
+2. Scheduler setup (repeatable jobs) + graceful drain on shutdown.
+
+## Session 3 — 2026-09-06 — Phase 3 Background Jobs DONE
+- New: apps/server/src/jobs/{helpers,expiry-notifier,traffic-notifier,panel-health,receipt-reminder,expiry-handler,broadcast-worker,index}.test files.
+- helpers.ts: expiryWindows (6h/1d/3d ±30min), usagePercent/remainingGB, chunk, mapWithConcurrency (order-preserving, bounded).
+- expiry-notifier (hourly): ACTIVE subs in windows, live remaining traffic (best-effort), Persian template + [🔄 تمدید] button, Redis warn keys (4d TTL).
+- traffic-notifier (2h): paged ACTIVE subs grouped by panel, 5-concurrency live fetch per panel, 80%/95% warnings, Redis warn keys (7d TTL).
+- panel-health (3m): fresh 3x-ui client per active panel, Redis fail counter (10m TTL), 3 strikes → offline + SUPER_ADMIN alert; recovery → online + alert.
+- receipt-reminder (30m): pending receipts older than 30m → ADMIN+ alert with Persian count.
+- expiry-handler (hourly): ACTIVE past-expiry → EXPIRED (7-day grace), then deleteClient on panel + delete record (skips on panel failure for retry).
+- broadcast-worker: on-demand queue, limiter 20/s, ALL/ACTIVE/INACTIVE targeting, photo support, progress checkpoints every 50, DONE status + finishedAt.
+- index.ts startJobs(): upsertJobScheduler for 5 schedules + 6 workers with failed-event logging; returns close() for graceful drain.
+- main.ts: starts jobs best-effort (API stays up if Redis down), closes workers+queues on SIGTERM/SIGINT before Prisma/Redis teardown.
+
+### Verification (Session 3):
+- `tsc --noEmit` clean. `vitest` server 11/11 passed (4 new helper tests).
+- Boot smoke without Redis: /health {"ok":true} — jobs warn + degrade gracefully.
+
+## NEXT (Session 4) — Phase 4 REST API:
+1. Fastify routes + Zod validation for web panel + mini app (auth, users, subs, products, panels, finance, tickets, discounts, broadcast, settings).
+2. Receipt file-upload endpoint (multipart, magic-byte check already in middleware).
+3. MiniApp initData auth → JWT endpoint.
+
+## Session 4 — 2026-09-06 — Phase 4 REST API DONE
+- Schema: User.totpSecret (encrypted 2FA secret) + prisma generate.
+- Auth: lib/totp.ts (RFC6238 SHA1, base32, ±1 window, timing-safe); api/services/tokens.ts (RS256 access 15m + refresh 30d rotation, single-use, family revocation on reuse); adminAuth.ts (bot-delivered 6-digit login codes 5m TTL, timing-safe compare, temp 2FA token, TOTP provision/disable).
+- Services: dashboard.ts (30d revenue/new-users/subs series + revenue-by-group top 6), shop.ts (miniapp purchase/charge quotes + receipt attach + admin alerts).
+- Middleware: validate.ts (Zod preHandler → 400 Persian + per-user hourly pay limit via Redis, fail-open).
+- Routes (all in api/routes, registered via api/plugin.ts):
+  - auth.ts: POST /api/miniapp/auth (initData→JWT), /api/auth/refresh, /api/auth/admin/{request-code,login,2fa} (5/15min rate limits).
+  - me.ts: /api/me, /my/subscriptions (+live traffic), /my/transactions, /my/tickets GET+POST, /gift/redeem, /tutorials.
+  - shop.ts: /api/products, /api/purchase, /api/charge (10/hour/user), /api/purchase/:id/receipt (multipart upload).
+  - adminDashboard/Users/Catalog/Subs/Finance/Support/System: full CRUD — users (search/filter/block/balance+reason/message), products, panels (+test/sync/delete-guard), subscriptions (+suspend/restore/reset/delete/traffic), receipts (+approve/reject w/ user notify), transactions (+CSV export), tickets (+reply/close/departments), discounts (+generate/deactivate-expired) + gifts, broadcast (SUPER_ADMIN) + history, settings, BotMessages (+cache invalidate), force-join channels, admins (+TOTP provision), audit log.
+- main.ts: registerApi(app, bot); bot passed to routes needing Telegram send.
+
+### Verification (Session 4):
+- `tsc --noEmit` clean (fixed group-by null typing). `vitest` server 16/16 (5 new: TOTP roundtrip/reject/provision URL, mime bytes, strict-schema rejection).
+- Boot smoke: /health OK; POST /api/auth/refresh {} → 400 (Zod); GET /api/admin/dashboard no token → 401.
+
+## NEXT (Session 5) — Phase 5 Web Admin Panel:
+1. Next.js 14 app (apps/web): NextAuth credentials → backend JWT, RTL Persian layout, login + 2FA pages.
+2. Pages: dashboard (ApexCharts), users, subscriptions, products, panels, finance, tickets, discounts, broadcast, settings.
+
+## Session 5 — 2026-09-06 — Phase 5 Web Admin Panel DONE
+- Scaffold: apps/web (Next 14.2.5, React 18, Tailwind v3 RTL via dir=rtl, next-themes dark-default, tsconfig bundler paths).
+- Deps: next-auth@5beta, apexcharts+react-apexcharts@1.4.1 (pinned: v1.9 needs apexcharts v4), @tanstack/{react-query,react-table}, react-hook-form+@hookform/resolvers+zod, zustand.
+- Auth: NextAuth credentials — LoginForm (react-hook-form+zod, 3 steps: telegramId → bot code → TOTP) via server actions (no CORS), authorize() verifies token against backend /api/me + staff-role check; JWT session stores backend tokens, auto-rotates access via /api/auth/refresh; middleware guards /admin/*.
+- lib: api.ts (authed backend fetch, server-side), store.ts (zustand sidebar), format.ts (Intl fa-IR + persian-calendar Jalali).
+- Layout: Sidebar (collapsible, 10 Persian links, sign-out) + admin layout; root fa-IR/rtl/dark.
+- Dashboard: KPI cards, 4 ApexCharts (line revenue, bar users, donut groups, area subs, Jalali x-axis), RecentTxns via React Query 30s refetch, panel status badges.
+- Pages: users (TanStack Table + search + detail drawer w/ block + DM), subscriptions (suspend/restore/reset/delete), products (RHForm create + active toggle + delete), panels (create w/ backend connection test + test + delete), finance (receipt approve/reject + txns + CSV proxy export), tickets (list + thread + reply + close/reopen), discounts (tabs for discount/gift codes + CRUD), broadcast (target + composer + history), settings (payment, bot messages, channels, admins + TOTP provision, audit log).
+- All mutations via app/admin/actions.ts server actions (token stays server-side) + revalidatePath.
+- Notes: shadcn-style hand-rolled ui.tsx (Card/Badge/PageTitle) instead of full shadcn install; no next-intl (single fa-IR locale, fa.json unnecessary); CSV export proxied via /api/export/transactions.
+
+### Verification (Session 5):
+- `tsc --noEmit` clean (fixed tuple typing, next-auth/jwt augment, token casts).
+- `next build` OK — 16 routes (login static, admin dynamic).
+- Smoke: /login → 200, Persian text + dir=rtl present.
+
+## NEXT (Session 6) — Phase 6 Mini App:
+1. Vite + React app (apps/miniapp): Telegram SDK, JWT via initData, bottom tabs.
+2. Pages: Home, Buy, Services, Ticket, Profile (+ QR, theme, haptics).
+
+## Session 6 — 2026-09-06 — Phase 6 Mini App DONE
+- Scaffold: apps/miniapp (React 18 + Vite 5 + Tailwind RTL, port 3002, type:module).
+- Deps: @twa-dev/sdk, axios, zustand, react-router-dom v6, framer-motion, react-hot-toast@2.4 (v4 doesn't exist), qrcode.
+- Core: telegram.ts bridge (ready/expand, themeParams→CSS vars, haptics, initData, safe outside Telegram), api/client.ts (axios + Bearer JWT from memory-only zustand store + X-Telegram-Init-Data on every request), lib.ts (fa numbers, Jalali, shared types), ui.tsx (Card/Button/Skeleton/Sheet), Layout (5 bottom tabs in RTL order, Toaster rtl), App (AnimatePresence slide+fade, theme effect, login gate with Persian outside-Telegram message).
+- Pages: Home (hero, balance, services summary, quick grid), Buy (group pills, product cards, detail sheet + discount input, card info, camera file input, confirmation), Services (SVG traffic progress rings, pull-style refresh button, detail sheet with tap-to-copy subLink + QR + renew), Tickets (list, thread sheet, create sheet with department select, FAQ accordion), Profile (avatar/initials, stats, charge flow, gift redeem, theme toggle auto/dark/light, lazy transaction history).
+- Backend addition (Phase 4 gap): GET /api/departments (JWT, active only) for the ticket-create sheet.
+- Fixes: vite-env.d.ts for import.meta.env, tuple typings (noUncheckedIndexedAccess), ThemeParams cast via unknown.
+
+### Verification (Session 6):
+- `tsc --noEmit` clean (miniapp + server re-check).
+- `vite build` OK (553 modules, dist + assets).
+- Smoke: preview :3002 → 200, dir=rtl + #root + telegram-web-app.js present, bundle at /assets/index-*.js.
+
+## NEXT (Session 7) — Phase 7 Infrastructure:
+1. Dockerfiles (server/web/miniapp: multi-stage, non-root, Alpine), docker-compose.yml + prod (postgres/redis/minio/nginx/certbot).
+2. Nginx configs (3 domains, security headers, miniapp CSP frame-ancestors), GH Actions CI, README.fa.md.
+
+## Session 7 — 2026-09-06 — Phase 7 Infrastructure DONE
+- Server: lib/bootstrap.ts (BOOTSTRAP_ADMIN_IDS → promote to SUPER_ADMIN on boot) + main.ts wiring + .env.example entry.
+- Dockerfiles: server (node:20-alpine, prisma generate, workspace builds, prod prune, USER node, /app/uploads volume, /health HEALTHCHECK), web (next build with NEXT_PUBLIC_BACKEND_URL ARG, USER nextjs, /login HEALTHCHECK), miniapp (vite build with VITE_API_URL ARG → nginxinc/nginx-unprivileged:alpine :3002 + CSP for Telegram webviews).
+- Compose: docker-compose.yml (dev: postgres/redis/minio + 3 apps, healthchecks, named volumes) validated; docker-compose.prod.yml (required-var enforcement, restart policies, nginx + certbot renew loop, .env required) validated with dummy env.
+- Nginx: nginx.conf (tokens off, gzip) + sites/panel|bot|miniapp.conf (HTTP→HTTPS + certbot webroot, TLS 1.2/1.3, full security headers per spec, miniapp frame-ancestors https://web.telegram.org).
+- docker/postgres/init.sql (pgcrypto), docker/redis/redis.conf (AOF, 256mb lru), .dockerignore.
+- CI: .github/workflows/ci.yml (install → prisma generate → turbo lint/typecheck/test → 3 builds).
+- README.fa.md: Persian setup guide (local, bootstrap admin, docker dev/prod, SSL, scripts, troubleshooting).
+- Repo fixes found by CI: turbo.json pipeline→tasks (turbo v2), installed @typescript-eslint v8 plugins, added --passWithNoTests to test-less packages, miniapp lint+test scripts + vitest@2 + lib.test.ts, pinned eslint-config-next@14.2.5 (v16 pulled eslint 10 which broke `next lint`), fixed 7 source lint errors (var→let, unused imports, rest-sibling rule, regex escape).
+
+### Verification (Session 7):
+- `docker compose config` OK (dev + prod).
+- `turbo run lint` 8/8, `turbo run test` 12/12, `turbo run typecheck` 13/13.
+- Builds: server ✓, web ✓ (16 routes), miniapp ✓.
+- Note: `.env` created locally from `.env.example` (gitignored) for compose validation — fill in real secrets before use.
+
+## PROJECT COMPLETE — all 7 phases done.
+Resume hints: `npm run dev` needs postgres+redis running (or `docker compose up postgres redis`); DB migrations: `npx prisma migrate dev --schema packages/db/prisma/schema.prisma` + seed; set BOT_TOKEN/WEBHOOK_SECRET/JWT keys/ENCRYPTION_KEY before first boot.
+
+## Session 8 — VPS deploy prep
+- Moved `prisma` CLI to dependencies in packages/db (+ `db:deploy` script) so migrations run inside the production server image (`prisma` was a devDep and got pruned).
+- Production seed path: `node packages/db/dist/seed.js` (compiled, no tsx needed).
+- Note: repo is not a git repo yet — user must `git init` + push to GitHub (or scp) to get code onto the VPS.
