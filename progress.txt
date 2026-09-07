@@ -160,4 +160,5 @@ Resume hints: `npm run dev` needs postgres+redis running (or `docker compose up 
 ## Session 8 — VPS deploy prep
 - Moved `prisma` CLI to dependencies in packages/db (+ `db:deploy` script) so migrations run inside the production server image (`prisma` was a devDep and got pruned).
 - Production seed path: `node packages/db/dist/seed.js` (compiled, no tsx needed).
+- Root .env.example completed: added DATABASE_URL default, POSTGRES_*, NEXTAUTH_URL/SECRET, NEXT_PUBLIC_BACKEND_URL, VITE_API_URL + comments explaining STORAGE_*/MINIO_* (local-only for now; MinIO provisioned for future).
 - Note: repo is not a git repo yet — user must `git init` + push to GitHub (or scp) to get code onto the VPS.
