@@ -1,0 +1,26 @@
+{
+  "translation": {
+    "login": {
+      "title": "Welcome to VitoriBot",
+      "email": "Email Address",
+      "password": "Password",
+      "submit": "Login",
+      "error": "Invalid credentials"
+    },
+    "map": {
+      "live": "Live Map",
+      "devices": "Devices",
+      "search": "Search devices...",
+      "status": {
+        "moving": "Moving",
+        "stopped": "Stopped",
+        "offline": "Offline"
+      }
+    },
+    "theme": {
+      "light": "Light",
+      "dark": "Dark",
+      "system": "System"
+    }
+  }
+}
